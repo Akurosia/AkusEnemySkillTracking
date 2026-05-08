@@ -1,0 +1,13 @@
+{
+  "Author": "kamot",
+  "Name": "AkusEnemySkillTracking",
+  "Punchline": "Records enemy actions by zone for logdata collection.",
+  "Description": "Tracks actions used by battle NPCs/enemies in the current territory and exports observations as JSON and JSONL. Slash command: /akust",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "logdata",
+    "enemy",
+    "skill",
+    "collection"
+  ]
+}

@@ -1,0 +1,8 @@
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\bin\x64\Debug\AkusEnemySkillTracking.deps.json
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\bin\x64\Debug\AkusEnemySkillTracking.dll
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\obj\x64\Debug\AkusEnemySkillTracking.csproj.AssemblyReference.cache
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\obj\x64\Debug\AkusEnemySkillTracking.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\obj\x64\Debug\AkusEnemySkillTracking.AssemblyInfoInputs.cache
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\obj\x64\Debug\AkusEnemySkillTracking.AssemblyInfo.cs
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\obj\x64\Debug\AkusEnemySkillTracking.csproj.CoreCompileInputs.cache
+C:\Users\kamot\Documents\GitHub\AkuLogdata\AkusEnemySkillTracking\obj\x64\Debug\AkusEnemySkillTracking.dll
