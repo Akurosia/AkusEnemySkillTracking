@@ -113,6 +113,7 @@ public sealed unsafe class SkillRecorder : IDisposable
     public void SaveSnapshot()
     {
         RepairTerritoryNames();
+        RepairContentMetadata();
         foreach (var observation in observations.Values)
             NormalizeObservationClassification(observation);
 
@@ -278,7 +279,13 @@ public sealed unsafe class SkillRecorder : IDisposable
             placeName["name"] = cached.PlaceName;
         }
 
-        if (cached.MapId != 0)
+        foreach (var map in cached.Maps.OrderBy(m => m.Id))
+        {
+            var maps = GetOrCreateArray(metadata, "maps");
+            AddMapIfMissing(maps, map.Id.ToString(), map.Name);
+        }
+
+        if (cached.Maps.Count == 0 && cached.MapId != 0)
         {
             var maps = GetOrCreateArray(metadata, "maps");
             AddMapIfMissing(maps, cached.MapId.ToString(), cached.MapName);
@@ -1070,6 +1077,9 @@ public sealed unsafe class SkillRecorder : IDisposable
         if (!configuration.Enabled)
             return;
 
+        if (message.IsHandled)
+            return;
+
         var typeName = message.LogKind.ToString();
         if (!IsContentChatType(typeName))
             return;
@@ -1276,8 +1286,79 @@ public sealed unsafe class SkillRecorder : IDisposable
             PlaceNameId = territory.PlaceName.RowId,
             PlaceName = territory.PlaceName.Value.Name.ToString(),
             MapId = territory.Map.RowId,
-            MapName = territory.Map.Value.PlaceName.Value.Name.ToString()
+            MapName = GetMapName(territory.Map.Value),
+            Maps = GetContentMaps(territory)
         };
+    }
+
+    private static List<MapMetadataObservation> GetContentMaps(TerritoryType territory)
+    {
+        var maps = new List<MapMetadataObservation>();
+        foreach (var map in Plugin.DataManager.GetExcelSheet<Map>())
+        {
+            if (!IsRelatedMap(map, territory))
+                continue;
+
+            AddMapMetadataIfMissing(maps, map.RowId, GetMapName(map));
+        }
+
+        if (maps.Count == 0 && territory.Map.RowId != 0)
+            AddMapMetadataIfMissing(maps, territory.Map.RowId, GetMapName(territory.Map.Value));
+
+        return maps;
+    }
+
+    private static bool IsRelatedMap(Map map, TerritoryType territory)
+    {
+        if (map.RowId == 0)
+            return false;
+
+        if (map.TerritoryType.RowId == territory.RowId)
+            return true;
+
+        var placeNameId = territory.PlaceName.RowId;
+        return placeNameId != 0
+            && (map.PlaceNameSub.RowId == placeNameId
+                || map.PlaceName.RowId == placeNameId
+                || map.PlaceNameRegion.RowId == placeNameId);
+    }
+
+    private static string GetMapName(Map map)
+    {
+        if (map.PlaceNameSub.RowId != 0)
+        {
+            var name = map.PlaceNameSub.Value.Name.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+                return name;
+        }
+
+        if (map.PlaceName.RowId != 0)
+        {
+            var name = map.PlaceName.Value.Name.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+                return name;
+        }
+
+        if (map.PlaceNameRegion.RowId != 0)
+        {
+            var name = map.PlaceNameRegion.Value.Name.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+                return name;
+        }
+
+        return string.Empty;
+    }
+
+    private static void AddMapMetadataIfMissing(List<MapMetadataObservation> maps, uint id, string name)
+    {
+        if (id == 0 || maps.Any(map => map.Id == id))
+            return;
+
+        maps.Add(new MapMetadataObservation
+        {
+            Id = id,
+            Name = name
+        });
     }
 
     private static string GetFallbackTerritoryName(ushort territoryId)
@@ -1289,6 +1370,18 @@ public sealed unsafe class SkillRecorder : IDisposable
     {
         foreach (var territoryId in observations.Values.Select(o => o.TerritoryId).Distinct().ToArray())
             RepairTerritoryNames(territoryId, TryGetResolvedTerritoryName(territoryId));
+    }
+
+    private void RepairContentMetadata()
+    {
+        foreach (var observation in observations.Values)
+            observation.ContentMetadata = GetContentMetadata(observation.TerritoryId);
+
+        foreach (var music in musicObservations.Values)
+            music.ContentMetadata = GetContentMetadata(music.TerritoryId);
+
+        foreach (var chatLine in chatLines)
+            chatLine.ContentMetadata = GetContentMetadata(chatLine.TerritoryId);
     }
 
     private void RepairTerritoryNames(ushort territoryId, string? resolvedName)
@@ -1344,8 +1437,7 @@ public sealed unsafe class SkillRecorder : IDisposable
             or "NPCDialogueAnnouncements"
             or "Notice"
             or "Urgent"
-            or "Progress"
-            or "Echo";
+            or "Progress";
     }
 
     private static bool IsContentLogMessage(ILogMessage message)

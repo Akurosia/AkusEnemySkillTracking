@@ -254,4 +254,13 @@ public sealed class ContentMetadataObservation
     public uint MapId { get; set; }
 
     public string MapName { get; set; } = string.Empty;
+
+    public List<MapMetadataObservation> Maps { get; set; } = [];
+}
+
+public sealed class MapMetadataObservation
+{
+    public uint Id { get; set; }
+
+    public string Name { get; set; } = string.Empty;
 }

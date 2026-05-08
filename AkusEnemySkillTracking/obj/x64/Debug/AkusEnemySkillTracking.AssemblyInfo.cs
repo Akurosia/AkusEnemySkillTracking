@@ -13,11 +13,11 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AkusEnemySkillTracking")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.1.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0.0+3b4880d1fbd2aa691466dd0ee982ee1265052c35")]
 [assembly: System.Reflection.AssemblyProductAttribute("AkusEnemySkillTracking")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AkusEnemySkillTracking")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.1.0.0")]
-[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "")]
+[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "https://git.akurosia.de/akurosia/AkuLogdata.git")]
 [assembly: System.Runtime.Versioning.TargetPlatformAttribute("Windows7.0")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatformAttribute("Windows7.0")]
 
