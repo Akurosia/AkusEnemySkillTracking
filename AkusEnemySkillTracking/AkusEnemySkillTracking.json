@@ -4,7 +4,7 @@
   "Punchline": "Records enemy actions by zone for logdata collection.",
   "Description": "Tracks actions used by battle NPCs/enemies in the current territory and exports observations as JSON and JSONL. Slash command: /akust",
   "ApplicableVersion": "any",
-  "IconUrl": "https://raw.githubusercontent.com/Akurosia/AkusEnemySkillTracking/refs/heads/main/AkusEnemySkillTracking/icon.png",
+  "IconUrl": "https://github.com/Akurosia/AkusEnemySkillTracking/raw/main/AkusEnemySkillTracking/icon.png",
   "Tags": [
     "logdata",
     "enemy",
