@@ -1,0 +1,7 @@
+bin/
+obj/
+AkusEnemySkillTracking/bin/
+AkusEnemySkillTracking/obj/
+.vs/
+.idea/
+*.user
