@@ -93,6 +93,14 @@ jobs:
           sha512sum artifacts/latest.zip > artifacts/checksums.sha512
           unzip -l artifacts/latest.zip
 
+          packaged_version="$(unzip -p artifacts/latest.zip AkusEnemySkillTracking.json | jq -r '.AssemblyVersion')"
+          if [[ "$packaged_version" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "Packaged plugin version $packaged_version does not match repo version ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+          echo "Packaged plugin version: $packaged_version"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v6
         with:
