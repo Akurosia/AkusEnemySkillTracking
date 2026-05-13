@@ -47,14 +47,43 @@ public sealed class MainWindow : Window, IDisposable
             config.Save();
         }
 
-        ImGui.TextUnformatted($"Enemy skill observations: {plugin.Recorder.Observations.Count}");
-        ImGui.TextUnformatted($"Job buckets: {plugin.Recorder.JobObservations.Count}");
-        ImGui.TextUnformatted($"Music observations: {plugin.Recorder.MusicObservations.Count}");
-        ImGui.TextUnformatted($"Chat lines: {plugin.Recorder.ChatLines.Count}");
-        ImGui.TextUnformatted($"Snapshot: {plugin.Recorder.SnapshotPath}");
-        ImGui.TextUnformatted($"Logdata shaped: {plugin.Recorder.LogdataPath}");
-        ImGui.TextUnformatted($"New logdata shaped: {plugin.Recorder.NewLogdataPath}");
-        ImGui.TextUnformatted($"JSONL: {plugin.Recorder.JsonLinesPath}");
+        if (jsonl)
+        {
+            ImGui.SameLine();
+            var maxJsonlMb = config.JsonLinesMaxMegabytes;
+            ImGui.SetNextItemWidth(90);
+            if (ImGui.InputInt("Max JSONL MB", ref maxJsonlMb))
+            {
+                config.JsonLinesMaxMegabytes = Math.Clamp(maxJsonlMb, 1, 1024);
+                config.Save();
+            }
+        }
+
+        var autoSaveOnZone = config.AutoSaveOnTerritoryChange;
+        if (ImGui.Checkbox("Autosave on zone change", ref autoSaveOnZone))
+        {
+            config.AutoSaveOnTerritoryChange = autoSaveOnZone;
+            config.Save();
+        }
+
+        ImGui.SameLine();
+        var autoSaveOnKo = config.AutoSaveOnLocalPlayerKo;
+        if (ImGui.Checkbox("Autosave on KO", ref autoSaveOnKo))
+        {
+            config.AutoSaveOnLocalPlayerKo = autoSaveOnKo;
+            config.Save();
+        }
+
+        ImGui.SameLine();
+        var autoSaveMinutes = config.AutoSaveIntervalMinutes;
+        ImGui.SetNextItemWidth(90);
+        if (ImGui.InputInt("Autosave min", ref autoSaveMinutes))
+        {
+            config.AutoSaveIntervalMinutes = Math.Clamp(autoSaveMinutes, 0, 60);
+            config.Save();
+        }
+
+        ImGui.TextUnformatted($"Enemy skill observations: {plugin.Recorder.Observations.Count} | Job buckets: {plugin.Recorder.JobObservations.Count} | Music observations: {plugin.Recorder.MusicObservations.Count} | Chat lines: {plugin.Recorder.ChatLines.Count}");
 
         if (ImGui.Button("Save snapshot"))
             plugin.Recorder.SaveSnapshot();
@@ -62,6 +91,10 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.Button("Open folder"))
             OpenFolder(Path.GetDirectoryName(plugin.Recorder.SnapshotPath)!);
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear JSONL"))
+            plugin.Recorder.ClearJsonLines();
 
         ImGui.SameLine();
         if (ImGui.Button("Clear"))

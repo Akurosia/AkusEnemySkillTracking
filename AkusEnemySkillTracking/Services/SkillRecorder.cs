@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Dalamud.Game.Chat;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
@@ -45,6 +46,10 @@ public sealed unsafe class SkillRecorder : IDisposable
     private readonly string newLogdataPath;
     private readonly string jsonlPath;
     private DateTime lastBgmPollUtc = DateTime.MinValue;
+    private DateTime lastAutoSaveUtc = DateTime.UtcNow;
+    private ushort lastTerritoryId;
+    private bool hasUnsavedChanges;
+    private bool wasUnconscious;
     private Hook<ReceiveActionEffectDelegate>? actionEffectHook;
     private Hook<SetBgmDelegate>? setBgmHook;
 
@@ -76,6 +81,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         logdataPath = Path.Combine(configDirectory, "akus-logdata-shaped.json");
         newLogdataPath = Path.Combine(configDirectory, "akus-logdata-new-shaped.json");
         jsonlPath = Path.Combine(configDirectory, "enemy-skill-observations.jsonl");
+        lastTerritoryId = (ushort)Plugin.ClientState.TerritoryType;
 
         LoadSnapshot();
         actionEffectHook = Plugin.GameInteropProvider.HookFromAddress<ReceiveActionEffectDelegate>(
@@ -142,6 +148,8 @@ public sealed unsafe class SkillRecorder : IDisposable
         File.WriteAllText(snapshotPath, JsonSerializer.Serialize(export, JsonOptions), Encoding.UTF8);
         File.WriteAllText(logdataPath, BuildLogdataJson().ToJsonString(JsonOptions), Encoding.UTF8);
         File.WriteAllText(newLogdataPath, BuildNewLogdataJson().ToJsonString(JsonOptions), Encoding.UTF8);
+        hasUnsavedChanges = false;
+        lastAutoSaveUtc = DateTime.UtcNow;
         Plugin.Log.Information("Saved {Count} enemy observations to {Path}, {LogdataPath}, and {NewLogdataPath}", observations.Count, snapshotPath, logdataPath, newLogdataPath);
     }
 
@@ -604,6 +612,19 @@ public sealed unsafe class SkillRecorder : IDisposable
         SaveSnapshot();
     }
 
+    public void ClearJsonLines()
+    {
+        try
+        {
+            if (File.Exists(jsonlPath))
+                File.Delete(jsonlPath);
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning(ex, "Could not delete JSONL observation stream.");
+        }
+    }
+
     public void Dispose()
     {
         SaveSnapshot();
@@ -747,6 +768,15 @@ public sealed unsafe class SkillRecorder : IDisposable
 
     private void OnFrameworkUpdate(IFramework framework)
     {
+        try
+        {
+            CheckAutoSaveBoundaries();
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Debug(ex, "Failed to check autosave boundaries.");
+        }
+
         if ((DateTime.UtcNow - lastBgmPollUtc).TotalSeconds < 2)
             return;
 
@@ -760,6 +790,42 @@ public sealed unsafe class SkillRecorder : IDisposable
         {
             Plugin.Log.Debug(ex, "Failed to poll current BGM.");
         }
+    }
+
+    private void CheckAutoSaveBoundaries()
+    {
+        var currentTerritoryId = (ushort)Plugin.ClientState.TerritoryType;
+        if (lastTerritoryId == 0)
+            lastTerritoryId = currentTerritoryId;
+
+        if (configuration.AutoSaveOnTerritoryChange && currentTerritoryId != 0 && currentTerritoryId != lastTerritoryId)
+        {
+            AutoSaveIfDirty($"territory changed from {lastTerritoryId} to {currentTerritoryId}");
+            lastTerritoryId = currentTerritoryId;
+        }
+
+        var isUnconscious = Plugin.Condition[ConditionFlag.Unconscious];
+        if (configuration.AutoSaveOnLocalPlayerKo && isUnconscious && !wasUnconscious)
+            AutoSaveIfDirty("local player became unconscious");
+        wasUnconscious = isUnconscious;
+
+        var intervalMinutes = Math.Clamp(configuration.AutoSaveIntervalMinutes, 0, 60);
+        if (intervalMinutes > 0 && DateTime.UtcNow - lastAutoSaveUtc >= TimeSpan.FromMinutes(intervalMinutes))
+            AutoSaveIfDirty($"{intervalMinutes} minute interval elapsed");
+    }
+
+    private void AutoSaveIfDirty(string reason)
+    {
+        if (!hasUnsavedChanges)
+            return;
+
+        Plugin.Log.Debug("Autosaving observations because {Reason}.", reason);
+        SaveSnapshot();
+    }
+
+    private void MarkUnsavedChanges()
+    {
+        hasUnsavedChanges = true;
     }
 
     private void Record(uint sourceId, ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, GameObjectId* targetEntityIds)
@@ -836,6 +902,8 @@ public sealed unsafe class SkillRecorder : IDisposable
 
         if (configuration.RecordJsonLines)
             AppendJsonLine(observation);
+
+        MarkUnsavedChanges();
     }
 
     private void RecordJobAction(IPlayerCharacter owner, IGameObject source, ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, GameObjectId* targetEntityIds)
@@ -890,6 +958,8 @@ public sealed unsafe class SkillRecorder : IDisposable
                 UpdateMitigationType(skillStatus, effect);
             }
         }
+
+        MarkUnsavedChanges();
     }
 
     private void RecordMusic(ushort bgmId, uint? sceneId = null)
@@ -923,6 +993,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         }
 
         music.Count++;
+        MarkUnsavedChanges();
     }
 
     private static void EnrichMusic(MusicObservation music)
@@ -1110,6 +1181,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         chatLines.Add(line);
         if (chatLines.Count > 1000)
             chatLines.RemoveRange(0, chatLines.Count - 1000);
+        MarkUnsavedChanges();
     }
 
     private void RecordLogMessage(ILogMessage message)
@@ -1146,6 +1218,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         chatLines.Add(line);
         if (chatLines.Count > 1000)
             chatLines.RemoveRange(0, chatLines.Count - 1000);
+        MarkUnsavedChanges();
     }
 
     private void PollCurrentBgm()
@@ -1933,11 +2006,26 @@ public sealed unsafe class SkillRecorder : IDisposable
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(jsonlPath)!);
+            RotateJsonLinesIfNeeded();
             File.AppendAllText(jsonlPath, JsonSerializer.Serialize(observation, JsonOptions) + Environment.NewLine, Encoding.UTF8);
         }
         catch (Exception ex)
         {
             Plugin.Log.Warning(ex, "Could not append enemy skill JSONL observation.");
         }
+    }
+
+    private void RotateJsonLinesIfNeeded()
+    {
+        var maxMegabytes = Math.Clamp(configuration.JsonLinesMaxMegabytes, 1, 1024);
+        var maxBytes = maxMegabytes * 1024L * 1024L;
+        if (!File.Exists(jsonlPath) || new FileInfo(jsonlPath).Length < maxBytes)
+            return;
+
+        var oldPath = jsonlPath + ".old";
+        if (File.Exists(oldPath))
+            File.Delete(oldPath);
+
+        File.Move(jsonlPath, oldPath);
     }
 }

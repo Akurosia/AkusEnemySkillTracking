@@ -10,7 +10,15 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool Enabled { get; set; } = true;
 
-    public bool RecordJsonLines { get; set; } = true;
+    public bool RecordJsonLines { get; set; }
+
+    public int JsonLinesMaxMegabytes { get; set; } = 25;
+
+    public bool AutoSaveOnTerritoryChange { get; set; } = true;
+
+    public bool AutoSaveOnLocalPlayerKo { get; set; } = true;
+
+    public int AutoSaveIntervalMinutes { get; set; } = 5;
 
     public int RecentLimit { get; set; } = 200;
 
