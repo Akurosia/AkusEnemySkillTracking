@@ -14,11 +14,21 @@ public sealed class Configuration : IPluginConfiguration
 
     public int JsonLinesMaxMegabytes { get; set; } = 25;
 
+    public bool StoreLocalFiles { get; set; } = true;
+
+    public bool StoreLocalFilesWhenRemoteUploadEnabled { get; set; } = true;
+
     public bool AutoSaveOnTerritoryChange { get; set; } = true;
 
     public bool AutoSaveOnLocalPlayerKo { get; set; } = true;
 
     public int AutoSaveIntervalMinutes { get; set; } = 5;
+
+    public bool RemoteUploadEnabled { get; set; }
+
+    public string RemoteEndpointUrl { get; set; } = string.Empty;
+
+    public string RemoteEndpointToken { get; set; } = string.Empty;
 
     public int RecentLimit { get; set; } = 200;
 

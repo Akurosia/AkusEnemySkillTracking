@@ -83,6 +83,63 @@ public sealed class MainWindow : Window, IDisposable
             config.Save();
         }
 
+        ImGui.Separator();
+        ImGui.TextUnformatted("Storage");
+
+        var storeLocal = config.StoreLocalFiles;
+        if (ImGui.Checkbox("Store local files", ref storeLocal))
+        {
+            config.StoreLocalFiles = storeLocal;
+            config.Save();
+        }
+
+        ImGui.SameLine();
+        var remoteUpload = config.RemoteUploadEnabled;
+        if (ImGui.Checkbox("Remote upload", ref remoteUpload))
+        {
+            config.RemoteUploadEnabled = remoteUpload;
+            config.Save();
+        }
+
+        if (remoteUpload)
+        {
+            var storeLocalWithRemote = config.StoreLocalFilesWhenRemoteUploadEnabled;
+            if (ImGui.Checkbox("Try remote, but also store local copy", ref storeLocalWithRemote))
+            {
+                config.StoreLocalFilesWhenRemoteUploadEnabled = storeLocalWithRemote;
+                config.Save();
+            }
+
+            ImGui.TextUnformatted("Endpoint URL");
+            var endpoint = config.RemoteEndpointUrl;
+            ImGui.SetNextItemWidth(-1);
+            if (ImGui.InputText("##RemoteEndpointUrl", ref endpoint, 512))
+            {
+                config.RemoteEndpointUrl = endpoint.Trim();
+                config.Save();
+            }
+
+            ImGui.TextUnformatted("Endpoint token");
+            var token = config.RemoteEndpointToken;
+            ImGui.SetNextItemWidth(-1);
+            if (ImGui.InputText("##RemoteEndpointToken", ref token, 256, ImGuiInputTextFlags.Password))
+            {
+                config.RemoteEndpointToken = token;
+                config.Save();
+            }
+
+            if (plugin.Recorder.UploadInProgress)
+                ImGui.TextUnformatted("Upload status: running...");
+            else
+                // ImGui.TextUnformatted($"Upload status: {plugin.Recorder.LastUploadStatus}");
+                ImGui.TextUnformatted($"Upload status: done");
+        }
+
+        if (plugin.Recorder.SaveInProgress)
+            ImGui.TextUnformatted("Save status: running...");
+        else
+            ImGui.TextUnformatted($"Save status: {plugin.Recorder.LastSaveStatus}");
+
         ImGui.TextUnformatted($"Enemy skill observations: {plugin.Recorder.Observations.Count} | Job buckets: {plugin.Recorder.JobObservations.Count} | Music observations: {plugin.Recorder.MusicObservations.Count} | Chat lines: {plugin.Recorder.ChatLines.Count}");
 
         if (ImGui.Button("Save snapshot"))

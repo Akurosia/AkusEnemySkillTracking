@@ -1,11 +1,15 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.0.2</Version>
+    <Version>0.0.5</Version>
     <PackageProjectUrl>https://github.com/Akurosia/AkusEnemySkillTracking</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="AkusEnemySkillTracking.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <Target Name="CopyPluginManifestToOutput" AfterTargets="Build">
     <Copy SourceFiles="$(MSBuildProjectDirectory)\AkusEnemySkillTracking.json"

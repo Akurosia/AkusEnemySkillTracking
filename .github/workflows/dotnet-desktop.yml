@@ -51,15 +51,18 @@ jobs:
             version="$(grep -oPm1 '(?<=<Version>)[^<]+' "$PROJECT_PATH")"
           fi
 
-          IFS='.' read -ra version_parts <<< "$version"
+          IFS='.' read -ra raw_version_parts <<< "$version"
+          semver="${raw_version_parts[0]:-0}.${raw_version_parts[1]:-0}.${raw_version_parts[2]:-0}"
+
+          version_parts=("${raw_version_parts[@]}")
           while [[ "${#version_parts[@]}" -lt 4 ]]; do
             version_parts+=("0")
           done
           assembly_version="${version_parts[0]}.${version_parts[1]}.${version_parts[2]}.${version_parts[3]}"
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version=$semver" >> "$GITHUB_OUTPUT"
           echo "assembly_version=$assembly_version" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $version"
+          echo "Resolved version: $semver"
           echo "Resolved assembly version: $assembly_version"
 
       - name: Build
@@ -138,7 +141,7 @@ jobs:
           download_url="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/latest.zip"
 
           jq \
-            --arg release_version "${{ steps.version.outputs.assembly_version }}" \
+            --arg release_version "$release_version" \
             --arg download_url "$download_url" \
             '.[0].AssemblyVersion = $release_version |
              .[0].TestingAssemblyVersion = $release_version |

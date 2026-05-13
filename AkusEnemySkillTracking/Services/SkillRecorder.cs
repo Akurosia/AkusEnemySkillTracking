@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Threading.Tasks;
 using Dalamud.Game.Chat;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
@@ -26,7 +28,14 @@ public sealed unsafe class SkillRecorder : IDisposable
 {
     private const string HostedBgmCsvUrl = "https://raw.githubusercontent.com/ff-meli/OrchestrionPlugin/master/Data/xiv_bgm.csv";
     private static readonly object HostedBgmLock = new();
+    private static readonly HttpClient HttpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(20)
+    };
+
     private static Dictionary<ushort, string>? hostedBgmNames;
+    private readonly object uploadStatusLock = new();
+    private readonly object saveStatusLock = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -49,6 +58,12 @@ public sealed unsafe class SkillRecorder : IDisposable
     private DateTime lastAutoSaveUtc = DateTime.UtcNow;
     private ushort lastTerritoryId;
     private bool hasUnsavedChanges;
+    private bool saveInProgress;
+    private bool saveQueued;
+    private string lastSaveStatus = "Snapshot has not been saved this session.";
+    private bool uploadInProgress;
+    private string lastUploadStatus = "Remote upload has not run yet.";
+    private DateTimeOffset? lastUploadAttemptUtc;
     private bool wasUnconscious;
     private Hook<ReceiveActionEffectDelegate>? actionEffectHook;
     private Hook<SetBgmDelegate>? setBgmHook;
@@ -116,7 +131,94 @@ public sealed unsafe class SkillRecorder : IDisposable
 
     public string JsonLinesPath => jsonlPath;
 
+    public bool SaveInProgress
+    {
+        get
+        {
+            lock (saveStatusLock)
+                return saveInProgress;
+        }
+    }
+
+    public string LastSaveStatus
+    {
+        get
+        {
+            lock (saveStatusLock)
+                return lastSaveStatus;
+        }
+    }
+
+    public bool UploadInProgress
+    {
+        get
+        {
+            lock (uploadStatusLock)
+                return uploadInProgress;
+        }
+    }
+
+    public string LastUploadStatus
+    {
+        get
+        {
+            lock (uploadStatusLock)
+                return lastUploadStatus;
+        }
+    }
+
     public void SaveSnapshot()
+    {
+        QueueSnapshotSave();
+    }
+
+    private void QueueSnapshotSave()
+    {
+        lock (saveStatusLock)
+        {
+            if (saveInProgress)
+            {
+                saveQueued = true;
+                lastSaveStatus = "Snapshot save queued...";
+                return;
+            }
+
+            saveInProgress = true;
+            lastSaveStatus = "Snapshot save running...";
+        }
+
+        _ = Task.Run(RunQueuedSnapshotSave);
+    }
+
+    private void RunQueuedSnapshotSave()
+    {
+        while (true)
+        {
+            try
+            {
+                SaveSnapshotNow();
+            }
+            catch (Exception ex)
+            {
+                SetSaveStatus($"Snapshot save failed: {ex.Message}");
+                Plugin.Log.Warning(ex, "Snapshot save failed.");
+            }
+
+            lock (saveStatusLock)
+            {
+                if (!saveQueued)
+                {
+                    saveInProgress = false;
+                    return;
+                }
+
+                saveQueued = false;
+                lastSaveStatus = "Snapshot save running...";
+            }
+        }
+    }
+
+    private void SaveSnapshotNow()
     {
         RepairTerritoryNames();
         RepairContentMetadata();
@@ -145,12 +247,121 @@ public sealed unsafe class SkillRecorder : IDisposable
                 .ToList()
         };
 
-        File.WriteAllText(snapshotPath, JsonSerializer.Serialize(export, JsonOptions), Encoding.UTF8);
-        File.WriteAllText(logdataPath, BuildLogdataJson().ToJsonString(JsonOptions), Encoding.UTF8);
-        File.WriteAllText(newLogdataPath, BuildNewLogdataJson().ToJsonString(JsonOptions), Encoding.UTF8);
+        var snapshotJson = JsonSerializer.Serialize(export, JsonOptions);
+        var logdataJson = BuildLogdataJson().ToJsonString(JsonOptions);
+        var newLogdataJson = BuildNewLogdataJson().ToJsonString(JsonOptions);
+
+        if (ShouldStoreLocalFiles())
+        {
+            File.WriteAllText(snapshotPath, snapshotJson, Encoding.UTF8);
+            File.WriteAllText(logdataPath, logdataJson, Encoding.UTF8);
+            File.WriteAllText(newLogdataPath, newLogdataJson, Encoding.UTF8);
+        }
+
+        QueueUploadSnapshot(snapshotJson, logdataJson, newLogdataJson);
         hasUnsavedChanges = false;
         lastAutoSaveUtc = DateTime.UtcNow;
+        SetSaveStatus($"Snapshot save OK at {DateTimeOffset.UtcNow:HH:mm:ss} UTC");
         Plugin.Log.Information("Saved {Count} enemy observations to {Path}, {LogdataPath}, and {NewLogdataPath}", observations.Count, snapshotPath, logdataPath, newLogdataPath);
+    }
+
+    private void SetSaveStatus(string message)
+    {
+        lock (saveStatusLock)
+            lastSaveStatus = message;
+    }
+
+    private bool ShouldStoreLocalFiles()
+    {
+        return configuration.StoreLocalFiles
+               || (configuration.RemoteUploadEnabled && configuration.StoreLocalFilesWhenRemoteUploadEnabled);
+    }
+
+    private void QueueUploadSnapshot(string snapshotJson, string logdataJson, string newLogdataJson)
+    {
+        if (!configuration.RemoteUploadEnabled || string.IsNullOrWhiteSpace(configuration.RemoteEndpointUrl))
+            return;
+
+        lock (uploadStatusLock)
+        {
+            uploadInProgress = true;
+            lastUploadAttemptUtc = DateTimeOffset.UtcNow;
+            lastUploadStatus = "Remote upload running...";
+        }
+
+        _ = Task.Run(() => UploadSnapshot(snapshotJson, logdataJson, newLogdataJson));
+    }
+
+    private void UploadSnapshot(string snapshotJson, string logdataJson, string newLogdataJson)
+    {
+        try
+        {
+            var payload = new JsonObject
+            {
+                ["plugin"] = "AkusEnemySkillTracking",
+                ["sent_at_utc"] = DateTimeOffset.UtcNow,
+                ["snapshot"] = JsonNode.Parse(snapshotJson),
+                ["logdata"] = JsonNode.Parse(logdataJson),
+                ["new_logdata"] = JsonNode.Parse(newLogdataJson)
+            };
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, configuration.RemoteEndpointUrl)
+            {
+                Content = new StringContent(payload.ToJsonString(JsonOptions), Encoding.UTF8, "application/json")
+            };
+
+            if (!string.IsNullOrWhiteSpace(configuration.RemoteEndpointToken))
+                request.Headers.TryAddWithoutValidation("X-Akus-Token", configuration.RemoteEndpointToken);
+
+            using var response = HttpClient.Send(request);
+            var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            if (!response.IsSuccessStatusCode)
+            {
+                SetUploadStatus(false, FormatUploadStatus($"Remote upload failed: HTTP {(int)response.StatusCode} {response.ReasonPhrase ?? string.Empty}".Trim(), responseBody));
+                Plugin.Log.Warning("Remote upload failed with HTTP {StatusCode}: {ReasonPhrase}", (int)response.StatusCode, response.ReasonPhrase ?? string.Empty);
+                return;
+            }
+
+            SetUploadStatus(true, FormatUploadStatus($"Remote upload OK: HTTP {(int)response.StatusCode}", responseBody));
+        }
+        catch (Exception ex)
+        {
+            SetUploadStatus(false, $"Remote upload failed: {ex.Message}");
+            Plugin.Log.Warning(ex, "Remote upload failed.");
+        }
+    }
+
+    private static string FormatUploadStatus(string prefix, string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+            return prefix;
+
+        try
+        {
+            var json = JsonNode.Parse(responseBody)?.AsObject();
+            var storageDir = json?["storage_dir"]?.GetValue<string>();
+            var storedAt = json?["stored_at"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(storageDir))
+                return $"{prefix}; stored in {storageDir}";
+            if (!string.IsNullOrWhiteSpace(storedAt))
+                return $"{prefix}; stored at {storedAt}";
+        }
+        catch
+        {
+            // Keep status formatting best-effort only; raw response text is not required here.
+        }
+
+        return responseBody.Length > 160 ? $"{prefix}; {responseBody[..160]}..." : $"{prefix}; {responseBody}";
+    }
+
+    private void SetUploadStatus(bool success, string message)
+    {
+        lock (uploadStatusLock)
+        {
+            uploadInProgress = false;
+            lastUploadAttemptUtc = DateTimeOffset.UtcNow;
+            lastUploadStatus = $"{message} at {lastUploadAttemptUtc:HH:mm:ss} UTC";
+        }
     }
 
     private JsonObject BuildLogdataJson()
@@ -627,7 +838,7 @@ public sealed unsafe class SkillRecorder : IDisposable
 
     public void Dispose()
     {
-        SaveSnapshot();
+        SaveSnapshotNow();
         Plugin.ChatGui.ChatMessageUnhandled -= OnChatMessage;
         Plugin.ChatGui.LogMessage -= OnLogMessage;
         Plugin.Framework.Update -= OnFrameworkUpdate;
