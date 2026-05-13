@@ -6,4 +6,10 @@
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <Target Name="CopyPluginManifestToOutput" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\AkusEnemySkillTracking.json"
+          DestinationFiles="$(TargetDir)AkusEnemySkillTracking.json"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>

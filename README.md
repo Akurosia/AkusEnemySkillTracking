@@ -8,13 +8,13 @@ Dalamud dev plugin for collecting enemy actions by territory/zone.
 dotnet build .\AkusEnemySkillTracking.sln -c Debug -p:Platform=x64
 ```
 
-The dev DLL is written to:
+The dev plugin folder is:
 
 ```text
-AkusEnemySkillTracking\bin\x64\Debug\AkusEnemySkillTracking.dll
+AkusEnemySkillTracking\bin\x64\Debug
 ```
 
-Add that DLL path in Dalamud under `/xlsettings` -> Experimental -> Dev Plugin Locations, then enable it from `/xlplugins` -> Dev Tools -> Installed Dev Plugins.
+Add that folder path in Dalamud under `/xlsettings` -> Experimental -> Dev Plugin Locations, then enable it from `/xlplugins` -> Dev Tools -> Installed Dev Plugins. Current Dalamud versions expect a manifest next to the DLL, so do not add the `.dll` file path directly.
 
 ## Use
 
