@@ -51,8 +51,16 @@ jobs:
             version="$(grep -oPm1 '(?<=<Version>)[^<]+' "$PROJECT_PATH")"
           fi
 
+          IFS='.' read -ra version_parts <<< "$version"
+          while [[ "${#version_parts[@]}" -lt 4 ]]; do
+            version_parts+=("0")
+          done
+          assembly_version="${version_parts[0]}.${version_parts[1]}.${version_parts[2]}.${version_parts[3]}"
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "assembly_version=$assembly_version" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $version"
+          echo "Resolved assembly version: $assembly_version"
 
       - name: Build
         run: |
@@ -62,8 +70,8 @@ jobs:
             --no-restore \
             --nologo \
             -p:Version=${{ steps.version.outputs.version }} \
-            -p:AssemblyVersion=${{ steps.version.outputs.version }} \
-            -p:FileVersion=${{ steps.version.outputs.version }}
+            -p:AssemblyVersion=${{ steps.version.outputs.assembly_version }} \
+            -p:FileVersion=${{ steps.version.outputs.assembly_version }}
 
       - name: Collect packaged artifact
         shell: bash
@@ -106,7 +114,7 @@ jobs:
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/latest.zip
@@ -130,7 +138,7 @@ jobs:
           download_url="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/latest.zip"
 
           jq \
-            --arg release_version "$release_version" \
+            --arg release_version "${{ steps.version.outputs.assembly_version }}" \
             --arg download_url "$download_url" \
             '.[0].AssemblyVersion = $release_version |
              .[0].TestingAssemblyVersion = $release_version |
