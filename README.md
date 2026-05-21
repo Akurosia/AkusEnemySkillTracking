@@ -46,7 +46,7 @@ akus-logdata-new-shaped.json
 ```
 
 inside Dalamud's plugin config directory for this plugin. Use `/akust export` or the window's "Save snapshot" button to force a snapshot write.
-`enemy-skill-observations.json` is the raw collector snapshot. `akus-logdata-shaped.json` is the first-pass output in the original logdata-style structure. `akus-logdata-new-shaped.json` is the newer `metadata/music/text/combatants` shape. All plugin JSON files are written as UTF-8.
+`enemy-skill-observations.json` is the raw collector snapshot. `akus-logdata-shaped.json` is the first-pass output in the original logdata-style structure. `akus-logdata-new-shaped.json` is the newer `metadata/music/text/combatants` shape. The new-shaped file uses territory type IDs as top-level zone keys, with the readable zone name stored under `metadata.territorytype.name`; this keeps zones distinct when multiple duties share the same map. All plugin JSON files are written as UTF-8.
 
 ## Merge Into Existing Logdata
 

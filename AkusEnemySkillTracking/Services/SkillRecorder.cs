@@ -50,6 +50,8 @@ public sealed unsafe class SkillRecorder : IDisposable
     private readonly Dictionary<string, MusicObservation> musicObservations = [];
     private readonly List<ChatLineObservation> chatLines = [];
     private readonly List<SkillObservation> recent = [];
+    private readonly List<PullTimelineEvent> currentPullTimeline = [];
+    private readonly List<PullTimelineEvent> lastPullTimeline = [];
     private readonly string snapshotPath;
     private readonly string logdataPath;
     private readonly string newLogdataPath;
@@ -64,6 +66,8 @@ public sealed unsafe class SkillRecorder : IDisposable
     private bool uploadInProgress;
     private string lastUploadStatus = "Remote upload has not run yet.";
     private DateTimeOffset? lastUploadAttemptUtc;
+    private DateTimeOffset? currentPullStartedUtc;
+    private int pullTimelineVersion;
     private bool wasUnconscious;
     private Hook<ReceiveActionEffectDelegate>? actionEffectHook;
     private Hook<SetBgmDelegate>? setBgmHook;
@@ -122,6 +126,14 @@ public sealed unsafe class SkillRecorder : IDisposable
     public IReadOnlyList<ChatLineObservation> ChatLines => chatLines;
 
     public IReadOnlyList<SkillObservation> Recent => recent;
+
+    public IReadOnlyList<PullTimelineEvent> CurrentPullTimeline => currentPullTimeline;
+
+    public IReadOnlyList<PullTimelineEvent> LastPullTimeline => lastPullTimeline;
+
+    public IReadOnlyList<PullTimelineEvent> ActivePullTimeline => currentPullTimeline.Count > 0 ? currentPullTimeline : lastPullTimeline;
+
+    public int PullTimelineVersion => pullTimelineVersion;
 
     public string SnapshotPath => snapshotPath;
 
@@ -427,7 +439,7 @@ public sealed unsafe class SkillRecorder : IDisposable
                      .ThenBy(o => o.SourceBaseId)
                      .ThenBy(o => o.ActionId))
         {
-            var content = GetNewContent(root, observation.TerritoryName, observation.ContentMetadata);
+            var content = GetNewContent(root, observation.TerritoryId, observation.TerritoryName, observation.ContentMetadata);
             var combatantKey = (observation.SourceBaseId > 0 ? observation.SourceBaseId : observation.SourceDataId).ToString();
             var combatant = GetOrCreateObject(GetOrCreateObject(content, "combatants"), combatantKey);
             var metadata = GetOrCreateObject(combatant, "metadata");
@@ -471,18 +483,25 @@ public sealed unsafe class SkillRecorder : IDisposable
         return root;
     }
 
-    private static JsonObject GetNewContent(JsonObject root, string territoryName, ContentMetadataObservation? contentMetadata = null)
+    private static JsonObject GetNewContent(JsonObject root, ushort territoryId, string territoryName, ContentMetadataObservation? contentMetadata = null)
     {
-        var content = GetOrCreateObject(root, territoryName);
-        PopulateContentMetadata(GetOrCreateObject(content, "metadata"), contentMetadata);
+        var content = GetOrCreateObject(root, territoryId.ToString());
+        PopulateContentMetadata(GetOrCreateObject(content, "metadata"), territoryId, territoryName, contentMetadata);
         _ = GetOrCreateObject(content, "music");
         _ = GetOrCreateObject(content, "combatants");
         return content;
     }
 
-    private static void PopulateContentMetadata(JsonObject metadata, ContentMetadataObservation? cached)
+    private static void PopulateContentMetadata(JsonObject metadata, ushort territoryId, string territoryName, ContentMetadataObservation? cached)
     {
-        cached ??= GetContentMetadata((ushort)Plugin.ClientState.TerritoryType);
+        cached ??= GetContentMetadata(territoryId);
+
+        if (territoryId != 0)
+        {
+            var territoryType = GetOrCreateObject(metadata, "territorytype");
+            territoryType["id"] = territoryId.ToString();
+            territoryType["name"] = territoryName;
+        }
 
         if (cached.ContentFinderConditionId != 0)
         {
@@ -533,7 +552,7 @@ public sealed unsafe class SkillRecorder : IDisposable
                      .OrderBy(m => m.TerritoryName, StringComparer.CurrentCulture)
                      .ThenBy(m => m.BgmId))
         {
-            var music = GetOrCreateObject(GetNewContent(root, item.TerritoryName, item.ContentMetadata), "music");
+            var music = GetOrCreateObject(GetNewContent(root, item.TerritoryId, item.TerritoryName, item.ContentMetadata), "music");
             var bgm = GetOrCreateObject(music, item.BgmId.ToString("X"));
             bgm["id"] = item.BgmId.ToString();
             bgm["name"] = item.Name;
@@ -548,7 +567,7 @@ public sealed unsafe class SkillRecorder : IDisposable
                      .OrderBy(c => c.TerritoryName, StringComparer.CurrentCulture)
                      .ThenBy(c => c.SeenAtUtc))
         {
-            var content = GetNewContent(root, line.TerritoryName, line.ContentMetadata);
+            var content = GetNewContent(root, line.TerritoryId, line.TerritoryName, line.ContentMetadata);
             var combatants = GetOrCreateObject(content, "combatants");
             var combatantKey = line.SenderBaseId > 0 ? line.SenderBaseId.ToString() : "";
             var combatant = GetOrCreateObject(combatants, combatantKey);
@@ -820,6 +839,10 @@ public sealed unsafe class SkillRecorder : IDisposable
         musicObservations.Clear();
         chatLines.Clear();
         recent.Clear();
+        currentPullTimeline.Clear();
+        lastPullTimeline.Clear();
+        currentPullStartedUtc = null;
+        pullTimelineVersion++;
         SaveSnapshot();
     }
 
@@ -1009,15 +1032,22 @@ public sealed unsafe class SkillRecorder : IDisposable
         if (lastTerritoryId == 0)
             lastTerritoryId = currentTerritoryId;
 
-        if (configuration.AutoSaveOnTerritoryChange && currentTerritoryId != 0 && currentTerritoryId != lastTerritoryId)
+        if (currentTerritoryId != 0 && currentTerritoryId != lastTerritoryId)
         {
-            AutoSaveIfDirty($"territory changed from {lastTerritoryId} to {currentTerritoryId}");
+            ResetPullTimeline("territory changed");
+            if (configuration.AutoSaveOnTerritoryChange)
+                AutoSaveIfDirty($"territory changed from {lastTerritoryId} to {currentTerritoryId}");
             lastTerritoryId = currentTerritoryId;
         }
 
         var isUnconscious = Plugin.Condition[ConditionFlag.Unconscious];
-        if (configuration.AutoSaveOnLocalPlayerKo && isUnconscious && !wasUnconscious)
-            AutoSaveIfDirty("local player became unconscious");
+        if (isUnconscious && !wasUnconscious)
+        {
+            ResetPullTimeline("local player became unconscious");
+            if (configuration.AutoSaveOnLocalPlayerKo)
+                AutoSaveIfDirty("local player became unconscious");
+        }
+
         wasUnconscious = isUnconscious;
 
         var intervalMinutes = Math.Clamp(configuration.AutoSaveIntervalMinutes, 0, 60);
@@ -1037,6 +1067,20 @@ public sealed unsafe class SkillRecorder : IDisposable
     private void MarkUnsavedChanges()
     {
         hasUnsavedChanges = true;
+    }
+
+    private void ResetPullTimeline(string reason)
+    {
+        if (currentPullTimeline.Count > 0)
+        {
+            lastPullTimeline.Clear();
+            lastPullTimeline.AddRange(currentPullTimeline);
+            currentPullTimeline.Clear();
+        }
+
+        currentPullStartedUtc = null;
+        pullTimelineVersion++;
+        Plugin.Log.Debug("Reset pull timeline because {Reason}.", reason);
     }
 
     private void Record(uint sourceId, ActionEffectHandler.Header* header, ActionEffectHandler.TargetEffects* effects, GameObjectId* targetEntityIds)
@@ -1077,6 +1121,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         var actionId = header->ActionId;
         var now = DateTimeOffset.UtcNow;
         var key = new SkillObservationKey(territoryId, sourceDataId, sourceName, actionId);
+        var partyHp = CapturePartyHpSnapshot();
 
         if (!observations.TryGetValue(key, out var observation))
         {
@@ -1102,6 +1147,7 @@ public sealed unsafe class SkillRecorder : IDisposable
 
         EnrichAction(observation, actionId);
         EnrichEnemy(observation, npc, source);
+        RecordEnemyPullTimeline(source, npc, actionId, observation.ActionName, observation.ActionIdHex, territoryId, territoryName, now, partyHp, effects, targetEntityIds, header->NumTargets);
         RecordActionEffects(observation, source, effects, targetEntityIds, header->NumTargets);
         observation.TotalUses++;
         observation.LastTargetCount = header->NumTargets;
@@ -1141,6 +1187,10 @@ public sealed unsafe class SkillRecorder : IDisposable
         skill.Count++;
         var sourceName = source.Name.ToString();
         skill.Sources.Add(string.IsNullOrWhiteSpace(sourceName) ? source.ObjectKind.ToString() : sourceName);
+        var now = DateTimeOffset.UtcNow;
+        var territoryId = (ushort)Plugin.ClientState.TerritoryType;
+        var territoryName = TryGetResolvedTerritoryName(territoryId) ?? GetFallbackTerritoryName(territoryId);
+        var partyHp = CapturePartyHpSnapshot();
 
         var targetCount = Math.Min(header->NumTargets, (byte)32);
         for (var targetIndex = 0; targetIndex < targetCount; targetIndex++)
@@ -1154,6 +1204,26 @@ public sealed unsafe class SkillRecorder : IDisposable
                 if (IsDamageEffect(effect))
                     skill.Damage.Add(effect.Value);
 
+                var targetRelation = GetTargetRelation(source, target);
+                if (IsHealingEffect(effect) && IsFriendlyHealingTarget(targetRelation))
+                    AddPullTimelineEvent(new PullTimelineEvent
+                    {
+                        SeenAtUtc = now,
+                        TerritoryId = territoryId,
+                        TerritoryName = territoryName,
+                        SourceKey = GetTimelineSourceKey(source, owner),
+                        SourceName = GetTimelineSourceName(source, owner),
+                        SourceType = "Ally",
+                        SourceBaseId = source.BaseId,
+                        ActionId = header->ActionId,
+                        ActionIdHex = header->ActionId.ToString("X"),
+                        ActionName = skill.Name,
+                        Kind = PullTimelineEventKind.AllyHealing,
+                        HealingAmount = effect.Value,
+                        PartyHp = partyHp,
+                        TargetRelations = [targetRelation]
+                    });
+
                 var statusId = TryGetStatusId(effect);
                 if (statusId == null)
                     continue;
@@ -1165,8 +1235,39 @@ public sealed unsafe class SkillRecorder : IDisposable
 
                 var skillStatus = GetOrCreateStatus(skill.StatusApplications, statusId.Value);
                 skillStatus.Count++;
-                skillStatus.TargetRelations.Add(GetPlayerStatusTargetRelation(source, target, statusId.Value));
+                var statusTargetRelation = GetPlayerStatusTargetRelation(source, target, statusId.Value);
+                skillStatus.TargetRelations.Add(statusTargetRelation);
                 UpdateMitigationType(skillStatus, effect);
+
+                var currentStatus = new StatusApplicationObservation
+                {
+                    StatusId = statusId.Value,
+                    StatusIdHex = statusId.Value.ToString("X")
+                };
+                EnrichStatus(currentStatus);
+                UpdateMitigationType(currentStatus, effect);
+
+                if (currentStatus.MitigationType != "unknown")
+                    AddPullTimelineEvent(new PullTimelineEvent
+                    {
+                        SeenAtUtc = now,
+                        TerritoryId = territoryId,
+                        TerritoryName = territoryName,
+                        SourceKey = GetTimelineSourceKey(source, owner),
+                        SourceName = GetTimelineSourceName(source, owner),
+                        SourceType = "Ally",
+                        SourceBaseId = source.BaseId,
+                        ActionId = header->ActionId,
+                        ActionIdHex = header->ActionId.ToString("X"),
+                        ActionName = skill.Name,
+                        Kind = PullTimelineEventKind.AllyMitigation,
+                        StatusId = currentStatus.StatusId,
+                        StatusIdHex = currentStatus.StatusIdHex,
+                        StatusName = currentStatus.StatusName,
+                        MitigationType = currentStatus.MitigationType,
+                        PartyHp = partyHp,
+                        TargetRelations = [statusTargetRelation]
+                    });
             }
         }
 
@@ -1894,6 +1995,158 @@ public sealed unsafe class SkillRecorder : IDisposable
             : null;
     }
 
+    private void RecordEnemyPullTimeline(
+        IGameObject source,
+        IBattleNpc npc,
+        uint actionId,
+        string actionName,
+        string actionIdHex,
+        ushort territoryId,
+        string territoryName,
+        DateTimeOffset now,
+        List<PartyHpSnapshot> partyHp,
+        ActionEffectHandler.TargetEffects* effects,
+        GameObjectId* targetEntityIds,
+        byte numTargets)
+    {
+        var sourceKey = GetTimelineSourceKey(source);
+        AddPullTimelineEvent(new PullTimelineEvent
+        {
+            SeenAtUtc = now,
+            TerritoryId = territoryId,
+            TerritoryName = territoryName,
+            SourceKey = sourceKey,
+            SourceName = source.Name.ToString(),
+            SourceType = "Enemy",
+            SourceBaseId = source.BaseId,
+            BattleNpcNameId = npc.NameId,
+            ActionId = actionId,
+            ActionIdHex = actionIdHex,
+            ActionName = actionName,
+            Kind = PullTimelineEventKind.EnemyAction,
+            PartyHp = partyHp
+        });
+
+        var statuses = new Dictionary<uint, PullTimelineEvent>();
+        var targetCount = Math.Min(numTargets, (byte)32);
+        for (var targetIndex = 0; targetIndex < targetCount; targetIndex++)
+        {
+            var target = FindTarget(targetEntityIds[targetIndex]);
+            foreach (var effect in effects[targetIndex].Effects)
+            {
+                if (effect.Type == 0)
+                    continue;
+
+                var statusId = TryGetStatusId(effect);
+                if (statusId == null)
+                    continue;
+
+                var status = new StatusApplicationObservation
+                {
+                    StatusId = statusId.Value,
+                    StatusIdHex = statusId.Value.ToString("X")
+                };
+                EnrichStatus(status);
+                UpdateMitigationType(status, effect);
+
+                if (!statuses.TryGetValue(statusId.Value, out var timelineEvent))
+                {
+                    timelineEvent = new PullTimelineEvent
+                    {
+                        SeenAtUtc = now,
+                        TerritoryId = territoryId,
+                        TerritoryName = territoryName,
+                        SourceKey = sourceKey,
+                        SourceName = source.Name.ToString(),
+                        SourceType = "Enemy",
+                        SourceBaseId = source.BaseId,
+                        BattleNpcNameId = npc.NameId,
+                        ActionId = actionId,
+                        ActionIdHex = actionIdHex,
+                        ActionName = actionName,
+                        Kind = PullTimelineEventKind.EnemyStatus,
+                        StatusId = status.StatusId,
+                        StatusIdHex = status.StatusIdHex,
+                        StatusName = status.StatusName,
+                        MitigationType = status.MitigationType,
+                        PartyHp = partyHp
+                    };
+                    statuses[statusId.Value] = timelineEvent;
+                }
+                else if (timelineEvent.MitigationType == "unknown" && status.MitigationType != "unknown")
+                {
+                    timelineEvent.MitigationType = status.MitigationType;
+                }
+
+                AddUniqueTimelineTarget(timelineEvent, GetTargetRelation(source, target));
+            }
+        }
+
+        foreach (var timelineEvent in statuses.Values)
+            AddPullTimelineEvent(timelineEvent);
+    }
+
+    private void AddPullTimelineEvent(PullTimelineEvent timelineEvent)
+    {
+        currentPullStartedUtc ??= timelineEvent.SeenAtUtc;
+        timelineEvent.SecondsFromPullStart = Math.Max(0, (timelineEvent.SeenAtUtc - currentPullStartedUtc.Value).TotalSeconds);
+        currentPullTimeline.Add(timelineEvent);
+        if (currentPullTimeline.Count > 3000)
+            currentPullTimeline.RemoveRange(0, currentPullTimeline.Count - 3000);
+
+        pullTimelineVersion++;
+    }
+
+    private static List<PartyHpSnapshot> CapturePartyHpSnapshot()
+    {
+        var snapshots = new List<PartyHpSnapshot>();
+        try
+        {
+            foreach (var member in Plugin.PartyList)
+            {
+                if (member == null || member.MaxHP == 0)
+                    continue;
+
+                snapshots.Add(new PartyHpSnapshot
+                {
+                    Name = member.Name.ToString(),
+                    CurrentHp = member.CurrentHP,
+                    MaxHp = member.MaxHP,
+                    Percent = Math.Round(member.CurrentHP * 100d / member.MaxHP, 1)
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Debug(ex, "Could not capture party HP snapshot.");
+        }
+
+        return snapshots;
+    }
+
+    private static void AddUniqueTimelineTarget(PullTimelineEvent timelineEvent, string targetRelation)
+    {
+        if (!timelineEvent.TargetRelations.Contains(targetRelation, StringComparer.CurrentCulture))
+            timelineEvent.TargetRelations.Add(targetRelation);
+    }
+
+    private static string GetTimelineSourceKey(IGameObject source, IPlayerCharacter? owner = null)
+    {
+        if (owner != null)
+            return $"ally:{owner.GameObjectId:X}:{source.GameObjectId:X}";
+
+        return $"{source.ObjectKind}:{source.BaseId}:{source.GameObjectId:X}";
+    }
+
+    private static string GetTimelineSourceName(IGameObject source, IPlayerCharacter owner)
+    {
+        var sourceName = source.Name.ToString();
+        if (string.IsNullOrWhiteSpace(sourceName) || source.GameObjectId == owner.GameObjectId)
+            return owner.Name.ToString();
+
+        return $"{owner.Name} / {sourceName}";
+    }
+
     private static void RecordActionEffects(
         SkillObservation observation,
         IGameObject source,
@@ -1954,6 +2207,16 @@ public sealed unsafe class SkillRecorder : IDisposable
     private static bool IsDamageEffect(ActionEffectHandler.Effect effect)
     {
         return effect.Value > 0 && effect.Type is 3 or 4 or 5 or 6;
+    }
+
+    private static bool IsHealingEffect(ActionEffectHandler.Effect effect)
+    {
+        return effect.Value > 0 && effect.Type is 4 or 10;
+    }
+
+    private static bool IsFriendlyHealingTarget(string targetRelation)
+    {
+        return targetRelation is "self" or "player" or "ally";
     }
 
     private static void ApplyNetworkDamageClassification(SkillObservation observation, ActionEffectHandler.Effect effect)

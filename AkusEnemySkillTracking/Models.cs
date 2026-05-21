@@ -241,6 +241,68 @@ public sealed class ChatLineObservation
     public DateTimeOffset SeenAtUtc { get; init; } = DateTimeOffset.UtcNow;
 }
 
+public enum PullTimelineEventKind
+{
+    EnemyAction,
+    EnemyStatus,
+    AllyMitigation,
+    AllyHealing
+}
+
+public sealed class PullTimelineEvent
+{
+    public DateTimeOffset SeenAtUtc { get; init; }
+
+    public double SecondsFromPullStart { get; set; }
+
+    public ushort TerritoryId { get; init; }
+
+    public string TerritoryName { get; init; } = string.Empty;
+
+    public string SourceKey { get; init; } = string.Empty;
+
+    public string SourceName { get; init; } = string.Empty;
+
+    public string SourceType { get; init; } = string.Empty;
+
+    public uint SourceBaseId { get; init; }
+
+    public uint BattleNpcNameId { get; init; }
+
+    public uint ActionId { get; init; }
+
+    public string ActionIdHex { get; init; } = string.Empty;
+
+    public string ActionName { get; init; } = string.Empty;
+
+    public PullTimelineEventKind Kind { get; init; }
+
+    public uint StatusId { get; init; }
+
+    public string StatusIdHex { get; init; } = string.Empty;
+
+    public string StatusName { get; init; } = string.Empty;
+
+    public string MitigationType { get; set; } = string.Empty;
+
+    public uint HealingAmount { get; init; }
+
+    public List<PartyHpSnapshot> PartyHp { get; init; } = [];
+
+    public List<string> TargetRelations { get; init; } = [];
+}
+
+public sealed class PartyHpSnapshot
+{
+    public string Name { get; init; } = string.Empty;
+
+    public uint CurrentHp { get; init; }
+
+    public uint MaxHp { get; init; }
+
+    public double Percent { get; init; }
+}
+
 public sealed class ContentMetadataObservation
 {
     public uint ContentFinderConditionId { get; set; }

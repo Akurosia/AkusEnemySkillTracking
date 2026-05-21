@@ -4,6 +4,12 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.ClientState.Objects.SubKinds;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -13,6 +19,11 @@ namespace AkusEnemySkillTracking.Windows;
 public sealed class MainWindow : Window, IDisposable
 {
     private readonly Plugin plugin;
+    private readonly Dictionary<string, TimelineEntitySelection> timelineSelections = [];
+    private List<PullTimelineEvent> generatedTimeline = [];
+    private List<TimelineEntityRow> timelineEntities = [];
+    private int timelineSelectionVersion = -1;
+    private string timelineExportStatus = "Timeline has not been exported this session.";
 
     public MainWindow(Plugin plugin)
         : base("AkusEnemySkillTracking##AkusEnemySkillTracking")
@@ -30,6 +41,11 @@ public sealed class MainWindow : Window, IDisposable
     }
 
     public override void Draw()
+    {
+        DrawTabs();
+    }
+
+    private void DrawSettings()
     {
         var config = plugin.Configuration;
         var enabled = config.Enabled;
@@ -175,7 +191,6 @@ public sealed class MainWindow : Window, IDisposable
         }
 
         ImGui.Separator();
-        DrawTabs();
     }
 
     private void DrawTabs()
@@ -183,6 +198,12 @@ public sealed class MainWindow : Window, IDisposable
         using var tabs = ImRaii.TabBar("tracking-tabs");
         if (!tabs.Success)
             return;
+
+        using (var tab = ImRaii.TabItem("Settings"))
+        {
+            if (tab.Success)
+                DrawSettings();
+        }
 
         using (var tab = ImRaii.TabItem("Enemy skills"))
         {
@@ -213,6 +234,333 @@ public sealed class MainWindow : Window, IDisposable
             if (tab.Success)
                 DrawPlayerJobs();
         }
+
+        using (var tab = ImRaii.TabItem("Pull timeline"))
+        {
+            if (tab.Success)
+                DrawPullTimeline();
+        }
+    }
+
+    private void DrawPullTimeline()
+    {
+        var events = plugin.Recorder.ActivePullTimeline;
+        SyncTimelineSelections(events);
+
+        ImGui.TextUnformatted($"Tracked pull events: {events.Count} | Generated rows: {generatedTimeline.Count}");
+        ImGui.SameLine();
+        if (plugin.Recorder.CurrentPullTimeline.Count == 0 && plugin.Recorder.LastPullTimeline.Count > 0)
+            ImGui.TextUnformatted("(showing last pull)");
+        else
+            ImGui.TextUnformatted("(showing current pull)");
+
+        if (ImGui.Button("Enable all"))
+            SetAllTimelineSelections(true);
+
+        ImGui.SameLine();
+        if (ImGui.Button("Disable all"))
+            SetAllTimelineSelections(false);
+
+        ImGui.SameLine();
+        if (ImGui.Button("Generate timeline"))
+            generatedTimeline = events.Where(IsTimelineEventSelected).OrderBy(e => e.SecondsFromPullStart).ToList();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Export CSV"))
+            ExportGeneratedTimelineCsv();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Export JSON"))
+            ExportGeneratedTimelineJson();
+
+        ImGui.TextUnformatted($"Export status: {timelineExportStatus}");
+        ImGui.Separator();
+        DrawGeneratedTimeline();
+        ImGui.Separator();
+        DrawTimelineEntityToggles();
+    }
+
+    private void DrawTimelineEntityToggles()
+    {
+        using var table = ImRaii.Table("timeline-entities", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable);
+        if (!table.Success)
+            return;
+
+        ImGui.TableSetupColumn("Entity");
+        ImGui.TableSetupColumn("Type");
+        ImGui.TableSetupColumn("Actions");
+        ImGui.TableSetupColumn("Statuses");
+        ImGui.TableSetupColumn("Mitigation");
+        ImGui.TableSetupColumn("Healing");
+        ImGui.TableHeadersRow();
+
+        foreach (var entity in timelineEntities
+                     .OrderBy(e => e.SourceType, StringComparer.CurrentCulture)
+                     .ThenBy(e => e.SourceName, StringComparer.CurrentCulture))
+        {
+            if (!timelineSelections.TryGetValue(entity.SourceKey, out var selection))
+                continue;
+
+            ImGui.TableNextRow();
+            TextCell(entity.SourceName);
+            TextCell(entity.SourceType);
+
+            ImGui.TableNextColumn();
+            if (entity.SourceType == "Enemy")
+            {
+                var enabled = selection.IncludeEnemyActions;
+                if (ImGui.Checkbox($"##action-{entity.SourceKey}", ref enabled))
+                    selection.IncludeEnemyActions = enabled;
+            }
+
+            ImGui.TableNextColumn();
+            if (entity.SourceType == "Enemy")
+            {
+                var enabled = selection.IncludeEnemyStatuses;
+                if (ImGui.Checkbox($"##status-{entity.SourceKey}", ref enabled))
+                    selection.IncludeEnemyStatuses = enabled;
+            }
+
+            ImGui.TableNextColumn();
+            if (entity.SourceType == "Ally")
+            {
+                var enabled = selection.IncludeAllyMitigation;
+                if (ImGui.Checkbox($"##mitigation-{entity.SourceKey}", ref enabled))
+                    selection.IncludeAllyMitigation = enabled;
+            }
+
+            ImGui.TableNextColumn();
+            if (entity.SourceType == "Ally")
+            {
+                var enabled = selection.IncludeAllyHealing;
+                if (ImGui.Checkbox($"##healing-{entity.SourceKey}", ref enabled))
+                    selection.IncludeAllyHealing = enabled;
+            }
+        }
+    }
+
+    private void DrawGeneratedTimeline()
+    {
+        ImGui.TextUnformatted("Generated timeline");
+        if (generatedTimeline.Count == 0)
+            ImGui.TextUnformatted("No rows generated yet. Select entities below, then press Generate timeline.");
+
+        using var table = ImRaii.Table("generated-timeline", 11, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable);
+        if (!table.Success)
+            return;
+
+        ImGui.TableSetupColumn("Time");
+        ImGui.TableSetupColumn("UTC");
+        ImGui.TableSetupColumn("Zone");
+        ImGui.TableSetupColumn("Entity");
+        ImGui.TableSetupColumn("Type");
+        ImGui.TableSetupColumn("Action");
+        ImGui.TableSetupColumn("Hex");
+        ImGui.TableSetupColumn("Status");
+        ImGui.TableSetupColumn("Healing");
+        ImGui.TableSetupColumn("Party HP");
+        ImGui.TableSetupColumn("Targets");
+        ImGui.TableHeadersRow();
+
+        foreach (var item in generatedTimeline.Take(1000))
+        {
+            ImGui.TableNextRow();
+            TextCell(FormatTimelineTime(item.SecondsFromPullStart));
+            TextCell(item.SeenAtUtc.ToString("HH:mm:ss.fff"));
+            TextCell(item.TerritoryName);
+            TextCell(item.SourceName);
+            TextCell(FormatTimelineKind(item.Kind));
+            TextCell(string.IsNullOrWhiteSpace(item.ActionName) ? "(unknown)" : item.ActionName);
+            TextCell(item.ActionIdHex);
+            TextCell(FormatTimelineStatus(item));
+            TextCell(item.HealingAmount == 0 ? "" : item.HealingAmount.ToString());
+            TextCell(FormatPartyHp(item.PartyHp));
+            TextCell(string.Join(", ", item.TargetRelations));
+        }
+    }
+
+    private void SyncTimelineSelections(IReadOnlyList<PullTimelineEvent> events)
+    {
+        if (timelineSelectionVersion == plugin.Recorder.PullTimelineVersion)
+            return;
+
+        timelineEntities = BuildTimelineEntityRows(events);
+        var keys = timelineEntities.Select(e => e.SourceKey).Distinct().ToHashSet(StringComparer.CurrentCulture);
+        foreach (var key in timelineSelections.Keys.Where(key => !keys.Contains(key)).ToArray())
+            timelineSelections.Remove(key);
+
+        foreach (var item in timelineEntities)
+        {
+            if (!timelineSelections.ContainsKey(item.SourceKey))
+                timelineSelections[item.SourceKey] = new TimelineEntitySelection();
+        }
+
+        timelineSelectionVersion = plugin.Recorder.PullTimelineVersion;
+    }
+
+    private static List<TimelineEntityRow> BuildTimelineEntityRows(IReadOnlyList<PullTimelineEvent> events)
+    {
+        var rows = new Dictionary<string, TimelineEntityRow>(StringComparer.CurrentCulture);
+        foreach (var item in events)
+        {
+            rows.TryAdd(item.SourceKey, new TimelineEntityRow(item.SourceKey, item.SourceName, item.SourceType));
+        }
+
+        AddLocalPlayerTimelineEntity(rows);
+
+        foreach (var obj in Plugin.ObjectTable)
+        {
+            if (obj == null)
+                continue;
+
+            if (obj is IPlayerCharacter player)
+            {
+                var key = GetTimelineEntitySourceKey(obj, player);
+                rows.TryAdd(key, new TimelineEntityRow(key, player.Name.ToString(), "Ally"));
+                continue;
+            }
+
+            if (obj.ObjectKind == ObjectKind.BattleNpc && !string.IsNullOrWhiteSpace(obj.Name.ToString()))
+            {
+                var key = GetTimelineEntitySourceKey(obj);
+                rows.TryAdd(key, new TimelineEntityRow(key, obj.Name.ToString(), "Enemy"));
+            }
+        }
+
+        return rows.Values.ToList();
+    }
+
+    private static void AddLocalPlayerTimelineEntity(Dictionary<string, TimelineEntityRow> rows)
+    {
+        foreach (var obj in Plugin.ObjectTable)
+        {
+            if (obj is not IPlayerCharacter player || player.ObjectIndex != 0)
+                continue;
+
+            var key = GetTimelineEntitySourceKey(player, player);
+            rows.TryAdd(key, new TimelineEntityRow(key, player.Name.ToString(), "Ally"));
+            return;
+        }
+    }
+
+    private static string GetTimelineEntitySourceKey(IGameObject source, IPlayerCharacter? owner = null)
+    {
+        if (owner != null)
+            return $"ally:{owner.GameObjectId:X}:{source.GameObjectId:X}";
+
+        return $"{source.ObjectKind}:{source.BaseId}:{source.GameObjectId:X}";
+    }
+
+    private void SetAllTimelineSelections(bool enabled)
+    {
+        foreach (var selection in timelineSelections.Values)
+        {
+            selection.IncludeEnemyActions = enabled;
+            selection.IncludeEnemyStatuses = enabled;
+            selection.IncludeAllyMitigation = enabled;
+            selection.IncludeAllyHealing = enabled;
+        }
+    }
+
+    private bool IsTimelineEventSelected(PullTimelineEvent item)
+    {
+        if (!timelineSelections.TryGetValue(item.SourceKey, out var selection))
+            return false;
+
+        return item.Kind switch
+        {
+            PullTimelineEventKind.EnemyAction => selection.IncludeEnemyActions,
+            PullTimelineEventKind.EnemyStatus => selection.IncludeEnemyStatuses,
+            PullTimelineEventKind.AllyMitigation => selection.IncludeAllyMitigation,
+            PullTimelineEventKind.AllyHealing => selection.IncludeAllyHealing,
+            _ => false
+        };
+    }
+
+    private void ExportGeneratedTimelineCsv()
+    {
+        if (generatedTimeline.Count == 0)
+        {
+            timelineExportStatus = "Generate a timeline before exporting.";
+            return;
+        }
+
+        try
+        {
+            var path = GetTimelineExportPath("csv");
+            var csv = new StringBuilder();
+            csv.AppendLine("time,seconds_from_pull_start,seen_at_utc,zone,entity,source_type,event_type,action_id,action_hex,action,status_id,status_hex,status,mitigation,healing_amount,party_hp,targets");
+            foreach (var item in generatedTimeline)
+            {
+                csv.AppendLine(string.Join(",", new[]
+                {
+                    CsvEscape(FormatTimelineTime(item.SecondsFromPullStart)),
+                    CsvEscape(item.SecondsFromPullStart.ToString("0.000")),
+                    CsvEscape(item.SeenAtUtc.ToString("O")),
+                    CsvEscape(item.TerritoryName),
+                    CsvEscape(item.SourceName),
+                    CsvEscape(item.SourceType),
+                    CsvEscape(FormatTimelineKind(item.Kind)),
+                    CsvEscape(item.ActionId.ToString()),
+                    CsvEscape(item.ActionIdHex),
+                    CsvEscape(item.ActionName),
+                    CsvEscape(item.StatusId == 0 ? "" : item.StatusId.ToString()),
+                    CsvEscape(item.StatusIdHex),
+                    CsvEscape(item.StatusName),
+                    CsvEscape(item.MitigationType),
+                    CsvEscape(item.HealingAmount == 0 ? "" : item.HealingAmount.ToString()),
+                    CsvEscape(FormatPartyHp(item.PartyHp)),
+                    CsvEscape(string.Join(", ", item.TargetRelations))
+                }));
+            }
+
+            File.WriteAllText(path, csv.ToString(), Encoding.UTF8);
+            timelineExportStatus = $"CSV exported to {path}";
+        }
+        catch (Exception ex)
+        {
+            timelineExportStatus = $"CSV export failed: {ex.Message}";
+            Plugin.Log.Warning(ex, "Could not export pull timeline CSV.");
+        }
+    }
+
+    private void ExportGeneratedTimelineJson()
+    {
+        if (generatedTimeline.Count == 0)
+        {
+            timelineExportStatus = "Generate a timeline before exporting.";
+            return;
+        }
+
+        try
+        {
+            var path = GetTimelineExportPath("json");
+            var json = JsonSerializer.Serialize(generatedTimeline, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+            File.WriteAllText(path, json, Encoding.UTF8);
+            timelineExportStatus = $"JSON exported to {path}";
+        }
+        catch (Exception ex)
+        {
+            timelineExportStatus = $"JSON export failed: {ex.Message}";
+            Plugin.Log.Warning(ex, "Could not export pull timeline JSON.");
+        }
+    }
+
+    private string GetTimelineExportPath(string extension)
+    {
+        var directory = Path.GetDirectoryName(plugin.Recorder.SnapshotPath)!;
+        Directory.CreateDirectory(directory);
+        return Path.Combine(directory, $"pull-timeline-{DateTimeOffset.Now:yyyyMMdd-HHmmss}.{extension}");
+    }
+
+    private static string CsvEscape(string? value)
+    {
+        value ??= string.Empty;
+        return $"\"{value.Replace("\"", "\"\"")}\"";
     }
 
     private void DrawEnemySkills()
@@ -512,6 +860,39 @@ public sealed class MainWindow : Window, IDisposable
         return string.Join(", ", statuses.SelectMany(s => s.TargetRelations).Distinct().Take(6));
     }
 
+    private static string FormatTimelineTime(double seconds)
+    {
+        var time = TimeSpan.FromSeconds(seconds);
+        return $"{(int)time.TotalMinutes:00}:{time.Seconds:00}.{time.Milliseconds / 100}";
+    }
+
+    private static string FormatTimelineKind(PullTimelineEventKind kind)
+    {
+        return kind switch
+        {
+            PullTimelineEventKind.EnemyAction => "Enemy action",
+            PullTimelineEventKind.EnemyStatus => "Enemy status",
+            PullTimelineEventKind.AllyMitigation => "Ally mitigation",
+            PullTimelineEventKind.AllyHealing => "Ally healing",
+            _ => kind.ToString()
+        };
+    }
+
+    private static string FormatTimelineStatus(PullTimelineEvent item)
+    {
+        if (item.StatusId == 0)
+            return string.Empty;
+
+        var name = string.IsNullOrWhiteSpace(item.StatusName) ? "(unknown)" : item.StatusName;
+        var mitigation = string.IsNullOrWhiteSpace(item.MitigationType) || item.MitigationType == "unknown" ? string.Empty : $" {item.MitigationType}";
+        return $"{name} [{item.StatusIdHex}]{mitigation}";
+    }
+
+    private static string FormatPartyHp(IEnumerable<PartyHpSnapshot> partyHp)
+    {
+        return string.Join(" | ", partyHp.Select(member => $"{member.Name} {member.CurrentHp}/{member.MaxHp} ({member.Percent:0.#}%)"));
+    }
+
     private static bool IsStatusLikeRawEffect(RawActionEffectObservation effect)
     {
         return effect.Type is >= 14 and <= 20;
@@ -532,4 +913,17 @@ public sealed class MainWindow : Window, IDisposable
             Plugin.Log.Warning(ex, "Could not open output folder.");
         }
     }
+
+    private sealed class TimelineEntitySelection
+    {
+        public bool IncludeEnemyActions { get; set; } = true;
+
+        public bool IncludeEnemyStatuses { get; set; } = true;
+
+        public bool IncludeAllyMitigation { get; set; } = true;
+
+        public bool IncludeAllyHealing { get; set; } = true;
+    }
+
+    private sealed record TimelineEntityRow(string SourceKey, string SourceName, string SourceType);
 }
