@@ -14,6 +14,9 @@ using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Game.ClientState.Objects.Types;
+using Dalamud.Game.Gui.Toast;
+using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -64,6 +67,8 @@ public sealed unsafe class SkillRecorder : IDisposable
     private bool saveQueued;
     private string lastSaveStatus = "Snapshot has not been saved this session.";
     private bool uploadInProgress;
+    private bool uploadQueued;
+    private UploadPayload? queuedUploadPayload;
     private string lastUploadStatus = "Remote upload has not run yet.";
     private DateTimeOffset? lastUploadAttemptUtc;
     private DateTimeOffset? currentPullStartedUtc;
@@ -92,6 +97,8 @@ public sealed unsafe class SkillRecorder : IDisposable
         byte a9,
         float initialVolume);
 
+    private sealed record UploadPayload(string SnapshotJson, string LogdataJson, string NewLogdataJson, string Label);
+
     public SkillRecorder(Configuration configuration)
     {
         this.configuration = configuration;
@@ -115,6 +122,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         Plugin.Framework.Update += OnFrameworkUpdate;
         Plugin.ChatGui.ChatMessageUnhandled += OnChatMessage;
         Plugin.ChatGui.LogMessage += OnLogMessage;
+        Plugin.ToastGui.QuestToast += OnQuestToast;
     }
 
     public IReadOnlyCollection<SkillObservation> Observations => observations.Values;
@@ -182,6 +190,40 @@ public sealed unsafe class SkillRecorder : IDisposable
     public void SaveSnapshot()
     {
         QueueSnapshotSave();
+    }
+
+    public void UploadLocalFilesToServer()
+    {
+        if (string.IsNullOrWhiteSpace(configuration.RemoteEndpointUrl))
+        {
+            SetUploadStatus("Local file upload failed: endpoint URL is empty");
+            return;
+        }
+
+        try
+        {
+            var missingFiles = new[] { snapshotPath, logdataPath, newLogdataPath }
+                .Where(path => !File.Exists(path))
+                .Select(Path.GetFileName)
+                .ToArray();
+
+            if (missingFiles.Length > 0)
+            {
+                SetUploadStatus($"Local file upload failed: missing {string.Join(", ", missingFiles)}");
+                return;
+            }
+
+            QueueUploadPayload(new UploadPayload(
+                File.ReadAllText(snapshotPath, Encoding.UTF8),
+                File.ReadAllText(logdataPath, Encoding.UTF8),
+                File.ReadAllText(newLogdataPath, Encoding.UTF8),
+                "Local file upload"));
+        }
+        catch (Exception ex)
+        {
+            SetUploadStatus($"Local file upload failed: {ex.Message}");
+            Plugin.Log.Warning(ex, "Local file upload failed.");
+        }
     }
 
     private void QueueSnapshotSave()
@@ -294,17 +336,53 @@ public sealed unsafe class SkillRecorder : IDisposable
         if (!configuration.RemoteUploadEnabled || string.IsNullOrWhiteSpace(configuration.RemoteEndpointUrl))
             return;
 
-        lock (uploadStatusLock)
-        {
-            uploadInProgress = true;
-            lastUploadAttemptUtc = DateTimeOffset.UtcNow;
-            lastUploadStatus = "Remote upload running...";
-        }
-
-        _ = Task.Run(() => UploadSnapshot(snapshotJson, logdataJson, newLogdataJson));
+        QueueUploadPayload(new UploadPayload(snapshotJson, logdataJson, newLogdataJson, "Remote upload"));
     }
 
-    private void UploadSnapshot(string snapshotJson, string logdataJson, string newLogdataJson)
+    private void QueueUploadPayload(UploadPayload payload)
+    {
+        lock (uploadStatusLock)
+        {
+            queuedUploadPayload = payload;
+            uploadQueued = true;
+
+            if (uploadInProgress)
+            {
+                lastUploadStatus = $"{payload.Label} queued; waiting for current upload...";
+                return;
+            }
+
+            uploadInProgress = true;
+        }
+
+        _ = Task.Run(RunQueuedUploads);
+    }
+
+    private void RunQueuedUploads()
+    {
+        while (true)
+        {
+            UploadPayload payload;
+            lock (uploadStatusLock)
+            {
+                if (!uploadQueued || queuedUploadPayload == null)
+                {
+                    uploadInProgress = false;
+                    return;
+                }
+
+                payload = queuedUploadPayload;
+                queuedUploadPayload = null;
+                uploadQueued = false;
+                lastUploadAttemptUtc = DateTimeOffset.UtcNow;
+                lastUploadStatus = $"{payload.Label} running...";
+            }
+
+            UploadSnapshot(payload);
+        }
+    }
+
+    private void UploadSnapshot(UploadPayload upload)
     {
         try
         {
@@ -312,9 +390,9 @@ public sealed unsafe class SkillRecorder : IDisposable
             {
                 ["plugin"] = "AkusEnemySkillTracking",
                 ["sent_at_utc"] = DateTimeOffset.UtcNow,
-                ["snapshot"] = JsonNode.Parse(snapshotJson),
-                ["logdata"] = JsonNode.Parse(logdataJson),
-                ["new_logdata"] = JsonNode.Parse(newLogdataJson)
+                ["snapshot"] = JsonNode.Parse(upload.SnapshotJson),
+                ["logdata"] = JsonNode.Parse(upload.LogdataJson),
+                ["new_logdata"] = JsonNode.Parse(upload.NewLogdataJson)
             };
 
             using var request = new HttpRequestMessage(HttpMethod.Post, configuration.RemoteEndpointUrl)
@@ -329,17 +407,17 @@ public sealed unsafe class SkillRecorder : IDisposable
             var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
             if (!response.IsSuccessStatusCode)
             {
-                SetUploadStatus(false, FormatUploadStatus($"Remote upload failed: HTTP {(int)response.StatusCode} {response.ReasonPhrase ?? string.Empty}".Trim(), responseBody));
-                Plugin.Log.Warning("Remote upload failed with HTTP {StatusCode}: {ReasonPhrase}", (int)response.StatusCode, response.ReasonPhrase ?? string.Empty);
+                SetUploadStatus(FormatUploadStatus($"{upload.Label} failed: HTTP {(int)response.StatusCode} {response.ReasonPhrase ?? string.Empty}".Trim(), responseBody));
+                Plugin.Log.Warning("{Label} failed with HTTP {StatusCode}: {ReasonPhrase}. Body: {ResponseBody}", upload.Label, (int)response.StatusCode, response.ReasonPhrase ?? string.Empty, responseBody);
                 return;
             }
 
-            SetUploadStatus(true, FormatUploadStatus($"Remote upload OK: HTTP {(int)response.StatusCode}", responseBody));
+            SetUploadStatus(FormatUploadStatus($"{upload.Label} OK: HTTP {(int)response.StatusCode}", responseBody));
         }
         catch (Exception ex)
         {
-            SetUploadStatus(false, $"Remote upload failed: {ex.Message}");
-            Plugin.Log.Warning(ex, "Remote upload failed.");
+            SetUploadStatus($"{upload.Label} failed: {ex.Message}");
+            Plugin.Log.Warning(ex, "{Label} failed.", upload.Label);
         }
     }
 
@@ -366,11 +444,10 @@ public sealed unsafe class SkillRecorder : IDisposable
         return responseBody.Length > 160 ? $"{prefix}; {responseBody[..160]}..." : $"{prefix}; {responseBody}";
     }
 
-    private void SetUploadStatus(bool success, string message)
+    private void SetUploadStatus(string message)
     {
         lock (uploadStatusLock)
         {
-            uploadInProgress = false;
             lastUploadAttemptUtc = DateTimeOffset.UtcNow;
             lastUploadStatus = $"{message} at {lastUploadAttemptUtc:HH:mm:ss} UTC";
         }
@@ -589,6 +666,8 @@ public sealed unsafe class SkillRecorder : IDisposable
             entry["seen_at_utc"] = line.SeenAtUtc;
             if (line.Parameters.Count > 0)
                 entry["parameters"] = JsonSerializer.SerializeToNode(line.Parameters);
+            if (line.QuestReferences.Count > 0)
+                entry["quests"] = JsonSerializer.SerializeToNode(line.QuestReferences.OrderBy(q => q.Id));
         }
     }
 
@@ -726,6 +805,8 @@ public sealed unsafe class SkillRecorder : IDisposable
             entry["seen_at_utc"] = line.SeenAtUtc;
             if (line.Parameters.Count > 0)
                 entry["parameters"] = JsonSerializer.SerializeToNode(line.Parameters);
+            if (line.QuestReferences.Count > 0)
+                entry["quests"] = JsonSerializer.SerializeToNode(line.QuestReferences.OrderBy(q => q.Id));
         }
     }
 
@@ -864,6 +945,7 @@ public sealed unsafe class SkillRecorder : IDisposable
         SaveSnapshotNow();
         Plugin.ChatGui.ChatMessageUnhandled -= OnChatMessage;
         Plugin.ChatGui.LogMessage -= OnLogMessage;
+        Plugin.ToastGui.QuestToast -= OnQuestToast;
         Plugin.Framework.Update -= OnFrameworkUpdate;
         actionEffectHook?.Disable();
         actionEffectHook?.Dispose();
@@ -1486,6 +1568,7 @@ public sealed unsafe class SkillRecorder : IDisposable
             Sender = message.Sender.ToString(),
             SenderBaseId = FindObjectBaseIdByName(message.Sender.ToString()),
             Message = message.Message.ToString(),
+            QuestReferences = GetQuestReferences(message.Message),
             SeenAtUtc = DateTimeOffset.UtcNow
         };
         EnrichChatSender(line);
@@ -1523,11 +1606,44 @@ public sealed unsafe class SkillRecorder : IDisposable
             SenderBaseId = FindObjectBaseIdByName(message.SourceEntity?.Name.ToString() ?? string.Empty),
             Message = message.FormatLogMessageForDebugging().ToString(),
             Parameters = GetLogMessageParameters(message),
+            QuestReferences = GetQuestReferences(message.FormatLogMessageForDebugging()),
             SeenAtUtc = DateTimeOffset.UtcNow
         };
         EnrichChatSender(line);
 
         chatLines.Add(line);
+        if (chatLines.Count > 1000)
+            chatLines.RemoveRange(0, chatLines.Count - 1000);
+        MarkUnsavedChanges();
+    }
+
+    private void OnQuestToast(ref SeString message, ref QuestToastOptions options, ref bool isHandled)
+    {
+        if (!configuration.Enabled)
+            return;
+
+        var territoryId = (ushort)Plugin.ClientState.TerritoryType;
+        var contentMetadata = GetContentMetadata(territoryId);
+        var resolvedTerritoryName = TryGetResolvedTerritoryName(territoryId);
+        RepairTerritoryNames(territoryId, resolvedTerritoryName);
+
+        chatLines.Add(new ChatLineObservation
+        {
+            TerritoryId = territoryId,
+            TerritoryName = resolvedTerritoryName ?? GetFallbackTerritoryName(territoryId),
+            TerritoryNameResolved = resolvedTerritoryName != null,
+            ContentMetadata = contentMetadata,
+            TypeId = options.IconId,
+            TypeName = "QuestToast",
+            Category = "QuestToast",
+            SourceKind = "Toast",
+            TargetKind = string.Empty,
+            Message = message.ToString(),
+            Parameters = GetQuestToastParameters(options),
+            QuestReferences = GetQuestReferences(message),
+            SeenAtUtc = DateTimeOffset.UtcNow
+        });
+
         if (chatLines.Count > 1000)
             chatLines.RemoveRange(0, chatLines.Count - 1000);
         MarkUnsavedChanges();
@@ -1868,6 +1984,54 @@ public sealed unsafe class SkillRecorder : IDisposable
         }
 
         return parameters;
+    }
+
+    private static List<string> GetQuestToastParameters(QuestToastOptions options)
+    {
+        var parameters = new List<string>
+        {
+            $"icon_id:{options.IconId}",
+            $"position:{options.Position}",
+            $"display_checkmark:{options.DisplayCheckmark}",
+            $"play_sound:{options.PlaySound}"
+        };
+
+        return parameters;
+    }
+
+    private static List<QuestReferenceObservation> GetQuestReferences(SeString message)
+    {
+        var quests = new Dictionary<uint, QuestReferenceObservation>();
+        foreach (var questRef in message.Payloads.OfType<QuestPayload>().Select(payload => payload.Quest))
+        {
+            if (questRef.RowId == 0 || quests.ContainsKey(questRef.RowId))
+                continue;
+
+            try
+            {
+                var quest = questRef.Value;
+                quests[questRef.RowId] = new QuestReferenceObservation
+                {
+                    Id = questRef.RowId,
+                    Name = quest.Name.ToString()
+                };
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.Debug(ex, "Could not resolve quest payload {QuestId}.", questRef.RowId);
+                quests[questRef.RowId] = new QuestReferenceObservation
+                {
+                    Id = questRef.RowId
+                };
+            }
+        }
+
+        return quests.Values.OrderBy(quest => quest.Id).ToList();
+    }
+
+    private static List<QuestReferenceObservation> GetQuestReferences(Lumina.Text.ReadOnly.ReadOnlySeString message)
+    {
+        return [];
     }
 
     private static void EnrichAction(SkillObservation observation, uint actionId)

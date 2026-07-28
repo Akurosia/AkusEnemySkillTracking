@@ -144,11 +144,14 @@ public sealed class MainWindow : Window, IDisposable
                 config.Save();
             }
 
+            ImGui.TextWrapped($"Upload status: {plugin.Recorder.LastUploadStatus}");
+
+            if (ImGui.Button("Upload local files now"))
+                plugin.Recorder.UploadLocalFilesToServer();
+
+            ImGui.SameLine();
             if (plugin.Recorder.UploadInProgress)
-                ImGui.TextUnformatted("Upload status: running...");
-            else
-                // ImGui.TextUnformatted($"Upload status: {plugin.Recorder.LastUploadStatus}");
-                ImGui.TextUnformatted($"Upload status: done");
+                ImGui.TextUnformatted("Upload is running or queued.");
         }
 
         if (plugin.Recorder.SaveInProgress)
@@ -724,7 +727,7 @@ public sealed class MainWindow : Window, IDisposable
 
     private void DrawChatLines()
     {
-        using var table = ImRaii.Table("chat-lines", 9, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable);
+        using var table = ImRaii.Table("chat-lines", 10, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable);
         if (!table.Success)
             return;
 
@@ -736,6 +739,7 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("Sender");
         ImGui.TableSetupColumn("Message");
         ImGui.TableSetupColumn("Parameters");
+        ImGui.TableSetupColumn("Quests");
         ImGui.TableSetupColumn("Seen UTC");
         ImGui.TableHeadersRow();
 
@@ -752,6 +756,7 @@ public sealed class MainWindow : Window, IDisposable
             TextCell(item.Sender);
             TextCell(item.Message);
             TextCell(string.Join(", ", item.Parameters));
+            TextCell(FormatQuestReferences(item.QuestReferences));
             TextCell(item.SeenAtUtc.ToString("u"));
         }
     }
@@ -858,6 +863,11 @@ public sealed class MainWindow : Window, IDisposable
     private static string FormatStatusTargets(IEnumerable<StatusApplicationObservation> statuses)
     {
         return string.Join(", ", statuses.SelectMany(s => s.TargetRelations).Distinct().Take(6));
+    }
+
+    private static string FormatQuestReferences(IEnumerable<QuestReferenceObservation> quests)
+    {
+        return string.Join(", ", quests.Select(q => string.IsNullOrWhiteSpace(q.Name) ? q.Id.ToString() : $"{q.Name} [{q.Id}]").Take(6));
     }
 
     private static string FormatTimelineTime(double seconds)

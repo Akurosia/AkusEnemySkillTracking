@@ -36,7 +36,7 @@ Open the plugin with:
 /akust
 ```
 
-The plugin records enemy actions, local player job action usage, status applications, damage ranges, enemy HP/level/IDs, and BGM changes. It writes:
+The plugin records enemy actions, local player job action usage, status applications, damage ranges, enemy HP/level/IDs, BGM changes, content text lines, and quest toasts. It writes:
 
 ```text
 enemy-skill-observations.json
@@ -46,7 +46,7 @@ akus-logdata-new-shaped.json
 ```
 
 inside Dalamud's plugin config directory for this plugin. Use `/akust export` or the window's "Save snapshot" button to force a snapshot write.
-`enemy-skill-observations.json` is the raw collector snapshot. `akus-logdata-shaped.json` is the first-pass output in the original logdata-style structure. `akus-logdata-new-shaped.json` is the newer `metadata/music/text/combatants` shape. The new-shaped file uses territory type IDs as top-level zone keys, with the readable zone name stored under `metadata.territorytype.name`; this keeps zones distinct when multiple duties share the same map. All plugin JSON files are written as UTF-8.
+`enemy-skill-observations.json` is the raw collector snapshot. `akus-logdata-shaped.json` is the first-pass output in the original logdata-style structure. `akus-logdata-new-shaped.json` is the newer `metadata/music/text/combatants` shape. The new-shaped file uses territory type IDs as top-level zone keys, with the readable zone name stored under `metadata.territorytype.name`; this keeps zones distinct when multiple duties share the same map. Captured quest toasts and quest links are exported under text entries as `quests` with quest IDs and names when Dalamud exposes them. All plugin JSON files are written as UTF-8.
 
 ## Merge Into Existing Logdata
 
@@ -86,4 +86,6 @@ Then use the endpoint URL in the plugin, for example:
 https://example.com/logdata_api.php
 ```
 
-On every snapshot save/autosave, the plugin sends `snapshot`, `logdata`, and `new_logdata`. The PHP endpoint writes them under `akus_uploads/` next to the script unless `AKUS_UPLOAD_DIR` is set. The plugin window shows the server response, including the resolved `storage_dir`.
+On every snapshot save/autosave, the plugin sends `snapshot`, `logdata`, and `new_logdata`. Uploads are serialized so an older snapshot cannot finish late and overwrite a newer server copy. The PHP endpoint writes the files under `akus_uploads/` next to the script unless `AKUS_UPLOAD_DIR` is set.
+
+The plugin window shows the latest upload status, including HTTP failures and the server response body when one is available. If the server copy looks stale or incomplete, use `Upload local files now` to send the already-written local `enemy-skill-observations.json`, `akus-logdata-shaped.json`, and `akus-logdata-new-shaped.json` files to the configured endpoint again.

@@ -238,7 +238,16 @@ public sealed class ChatLineObservation
 
     public List<string> Parameters { get; init; } = [];
 
+    public List<QuestReferenceObservation> QuestReferences { get; init; } = [];
+
     public DateTimeOffset SeenAtUtc { get; init; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class QuestReferenceObservation
+{
+    public uint Id { get; init; }
+
+    public string Name { get; init; } = string.Empty;
 }
 
 public enum PullTimelineEventKind
